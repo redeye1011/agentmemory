@@ -26,9 +26,9 @@ import { getGraphMaxSourceIds } from "../config.js";
 //               older than the retention cutoff, i.e. history that has
 //               already been replaced by a newer revision.
 //
-// Duplicate-name merging is real cleanup but it rewrites live rows, so
-// it stays opt-in (`mergeDuplicateNames: true`) and reports its count
-// in dry-run first.
+// Duplicate names are counted by the survey but not merged here: merging
+// rewrites live rows rather than removing dead ones, and needs its own
+// design for edge-key collisions and two-phase keeper writes.
 
 const DEFAULT_SUPERSEDED_RETENTION_DAYS = 90;
 
