@@ -124,6 +124,68 @@ describe("graph view reuse (#1300)", () => {
     expect(hits.some((r) => r.obsId === "obs_1")).toBe(false);
   });
 
+  // The visited cap used to bound only nodes popped off the heap. One hub
+  // node adds every neighbour to pathTo in a single iteration, so all of
+  // them were still returned and scored.
+  it("bounds discovered nodes on a star graph, not just expanded ones", async () => {
+    const ORIG = process.env["AGENTMEMORY_GRAPH_MAX_VISITED"];
+    process.env["AGENTMEMORY_GRAPH_MAX_VISITED"] = "5";
+    try {
+      const hub = makeNode("gn_hub", "hub", ["obs_hub"]);
+      const spokes: GraphNode[] = [];
+      const spokeEdges: GraphEdge[] = [];
+      for (let i = 0; i < 100; i++) {
+        spokes.push(makeNode(`gn_s${i}`, `spoke${i}`, [`obs_s${i}`]));
+        spokeEdges.push(makeEdge(`ge_s${i}`, "gn_hub", `gn_s${i}`));
+      }
+      const starKv = countingKV([hub, ...spokes], spokeEdges);
+      const star = new GraphRetrieval(starKv as never);
+      invalidateGraphCache(starKv as never);
+
+      const results = await star.searchByEntities(["hub"], 2, 1000);
+
+      // Start node plus at most the configured number of discovered nodes.
+      expect(results.length).toBeLessThanOrEqual(6);
+    } finally {
+      if (ORIG === undefined) delete process.env["AGENTMEMORY_GRAPH_MAX_VISITED"];
+      else process.env["AGENTMEMORY_GRAPH_MAX_VISITED"] = ORIG;
+    }
+  });
+
+  // A write landing while buildView is awaiting its two kv.list calls has no
+  // view to patch. The build must not then publish a snapshot that predates
+  // it.
+  it("does not lose a write that lands mid-build", async () => {
+    let releaseList: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      releaseList = resolve;
+    });
+    const base = countingKV([makeNode("gn_1", "docker", ["obs_1"])], []);
+    let gated = true;
+    const slowKv = {
+      ...base,
+      list: async <T>(scope: string): Promise<T[]> => {
+        if (gated) await gate;
+        return base.list<T>(scope);
+      },
+    };
+    const slow = new GraphRetrieval(slowKv as never);
+    invalidateGraphCache(slowKv as never);
+
+    const query = slow.searchByEntities(["docker"], 2, 10);
+
+    const fresh = makeNode("gn_2", "kubernetes", ["obs_late"]);
+    await base.set("mem:graph:nodes", fresh.id, fresh);
+    onGraphWrite(slowKv as never, "mem:graph:nodes", fresh.id, fresh);
+
+    gated = false;
+    releaseList();
+    await query;
+
+    const hits = await slow.searchByEntities(["kubernetes"], 2, 10);
+    expect(hits.some((r) => r.obsId === "obs_late")).toBe(true);
+  });
+
   it("rebuilds after an explicit invalidation", async () => {
     await retrieval.searchByEntities(["docker"], 2, 10);
     const before = kv.listCalls.length;

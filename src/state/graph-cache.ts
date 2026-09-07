@@ -36,11 +36,21 @@ export interface GraphView {
   nodesByObservation: Map<string, Set<string>>;
 }
 
+// A mutation that lands while buildView is awaiting the two kv.list calls
+// has nothing to patch, and the build would then publish a snapshot taken
+// before it. Queue those mutations and replay them onto the finished view;
+// an invalidation arriving mid-build discards the result instead.
+type PendingOp =
+  | { kind: "write"; scope: string; key: string; value: unknown }
+  | { kind: "delete"; scope: string; key: string };
+
 interface CacheEntry {
   view: GraphView | null;
   builtAt: number;
   building: Promise<GraphView> | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
+  pending: PendingOp[];
+  invalidatedDuringBuild: boolean;
 }
 
 const DEFAULT_TTL_MS = 300_000;
@@ -53,7 +63,14 @@ const caches = new WeakMap<object, CacheEntry>();
 function entryFor(kv: object): CacheEntry {
   let entry = caches.get(kv);
   if (!entry) {
-    entry = { view: null, builtAt: 0, building: null, idleTimer: null };
+    entry = {
+      view: null,
+      builtAt: 0,
+      building: null,
+      idleTimer: null,
+      pending: [],
+      invalidatedDuringBuild: false,
+    };
     caches.set(kv, entry);
   }
   return entry;
@@ -183,10 +200,27 @@ export async function getGraphView(kv: StateKV): Promise<GraphView> {
     return entry.view;
   }
   if (!entry.building) {
+    entry.invalidatedDuringBuild = false;
+    entry.pending = [];
     entry.building = buildView(kv)
       .then((built) => {
+        if (entry.invalidatedDuringBuild) {
+          // Something invalidated the graph while this build was reading.
+          // Serve the result once, but do not cache a snapshot we already
+          // know is behind.
+          entry.invalidatedDuringBuild = false;
+          entry.pending = [];
+          entry.view = null;
+          entry.builtAt = 0;
+          return built;
+        }
         entry.view = built;
         entry.builtAt = Date.now();
+        for (const op of entry.pending) {
+          if (op.kind === "write") applyWrite(built, op.scope, op.key, op.value);
+          else applyDelete(built, op.scope, op.key);
+        }
+        entry.pending = [];
         armIdleRelease(entry);
         return built;
       })
@@ -205,12 +239,36 @@ export async function getGraphView(kv: StateKV): Promise<GraphView> {
   return entry.building;
 }
 
+function applyWrite(
+  view: GraphView,
+  scope: string,
+  key: string,
+  value: unknown,
+): void {
+  if (scope === KV.graphNodes) {
+    const node = value as GraphNode;
+    deindexNode(view, key);
+    if (!node.stale) indexNode(view, { ...node, id: node.id ?? key });
+    return;
+  }
+  const edge = value as GraphEdge;
+  unlinkEdge(view, key);
+  if (!edge.stale) linkEdge(view, { ...edge, id: edge.id ?? key });
+}
+
+function applyDelete(view: GraphView, scope: string, key: string): void {
+  if (scope === KV.graphNodes) deindexNode(view, key);
+  else unlinkEdge(view, key);
+}
+
 /** Drops this store's view so the next read rebuilds from KV. */
 export function invalidateGraphCache(kv: object): void {
   const entry = caches.get(kv);
   if (!entry) return;
   entry.view = null;
   entry.builtAt = 0;
+  entry.pending = [];
+  if (entry.building) entry.invalidatedDuringBuild = true;
 }
 
 /**
@@ -226,30 +284,29 @@ export function onGraphWrite(
   value: unknown,
 ): void {
   if (!GRAPH_SCOPES.has(scope)) return;
-  const view = caches.get(kv)?.view;
-  if (!view) return;
+  const entry = caches.get(kv);
+  if (!entry) return;
   if (!value || typeof value !== "object") {
     invalidateGraphCache(kv);
     return;
   }
-  if (scope === KV.graphNodes) {
-    const node = value as GraphNode;
-    deindexNode(view, key);
-    if (!node.stale) indexNode(view, { ...node, id: node.id ?? key });
+  if (!entry.view) {
+    if (entry.building) entry.pending.push({ kind: "write", scope, key, value });
     return;
   }
-  const edge = value as GraphEdge;
-  unlinkEdge(view, key);
-  if (!edge.stale) linkEdge(view, { ...edge, id: edge.id ?? key });
+  applyWrite(entry.view, scope, key, value);
 }
 
 /** Write-through removal for a single graph row. */
 export function onGraphDelete(kv: object, scope: string, key: string): void {
   if (!GRAPH_SCOPES.has(scope)) return;
-  const view = caches.get(kv)?.view;
-  if (!view) return;
-  if (scope === KV.graphNodes) deindexNode(view, key);
-  else unlinkEdge(view, key);
+  const entry = caches.get(kv);
+  if (!entry) return;
+  if (!entry.view) {
+    if (entry.building) entry.pending.push({ kind: "delete", scope, key });
+    return;
+  }
+  applyDelete(entry.view, scope, key);
 }
 
 /**

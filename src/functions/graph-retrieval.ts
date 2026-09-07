@@ -307,9 +307,8 @@ export class GraphRetrieval {
       // Skip stale heap entries (cost beaten by a later push).
       if (cost > (dist.get(nodeId) ?? Infinity)) continue;
       if (depth >= maxDepth) continue;
-      // A hub node on a 69K-node graph can reach a large fraction of
-      // the corpus even at depth 2. Cap the walk: results past this
-      // point are weak paths that the caller would drop anyway.
+      // A hub node on a large graph can reach much of the corpus even at
+      // depth 2. Results past this point are weak paths the caller drops.
       if (++visited > maxVisited) break;
 
       const neighbors = view.adjacency.get(nodeId) ?? [];
@@ -318,6 +317,11 @@ export class GraphRetrieval {
         if (!nextNode) continue;
         const edge = view.edges.get(edgeId);
         if (!edge) continue;
+        // Bound discovery, not just expansion. A single hub node can add
+        // tens of thousands of neighbours in one iteration, all of which
+        // would be returned and scored even though the loop stops
+        // expanding them.
+        if (!dist.has(neighborId) && pathTo.size >= maxVisited) continue;
         // Clamp weight to avoid division-by-zero on malformed edges;
         // 0.01 is below the documented 0.1 floor.
         const edgeCost = 1 / Math.max(edge.weight, 0.01);
