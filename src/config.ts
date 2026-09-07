@@ -385,6 +385,38 @@ export function getGraphBatchSize(): number {
   return safeParseInt(getMergedEnv()["GRAPH_EXTRACTION_BATCH_SIZE"], 10);
 }
 
+// Provider circuit breaker. The old hardcoded 3-failure trip was far
+// too tight for a hosted LLM proxy that returns the occasional 502 or
+// slow response: three scattered failures took the provider offline for
+// every caller. Ten failures since the last success is still a decisive
+// signal that the upstream is down, and a 15s recovery probe gets the
+// provider back quickly when it is not.
+const CIRCUIT_BREAKER_FAILURE_THRESHOLD = 10;
+const CIRCUIT_BREAKER_FAILURE_WINDOW_MS = 60_000;
+const CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS = 15_000;
+
+export function getCircuitBreakerOptions(): {
+  failureThreshold: number;
+  failureWindowMs: number;
+  recoveryTimeoutMs: number;
+} {
+  const env = getMergedEnv();
+  return {
+    failureThreshold: safeParseInt(
+      env["AGENTMEMORY_CIRCUIT_FAILURE_THRESHOLD"],
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+    ),
+    failureWindowMs: safeParseInt(
+      env["AGENTMEMORY_CIRCUIT_FAILURE_WINDOW_MS"],
+      CIRCUIT_BREAKER_FAILURE_WINDOW_MS,
+    ),
+    recoveryTimeoutMs: safeParseInt(
+      env["AGENTMEMORY_CIRCUIT_RECOVERY_TIMEOUT_MS"],
+      CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS,
+    ),
+  };
+}
+
 // window for the smart-search followup-rate diagnostic. A second
 // search arriving within this many seconds (with disjoint results)
 // counts as a "follow-up" — a directional signal that the first result
