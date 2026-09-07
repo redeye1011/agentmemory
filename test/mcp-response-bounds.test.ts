@@ -91,8 +91,11 @@ describe("MCP response bounds", () => {
     expect(parsed.sessions.length).toBe(5);
     expect(parsed.total).toBe(40);
     expect(parsed.truncated).toBe(true);
-    // newest first
-    expect(parsed.sessions[0].startedAt as string).toBeDefined();
+    // Newest first, asserted as an ordering rather than mere presence:
+    // insertion order would otherwise pass.
+    const dates = parsed.sessions.map((s) => s.startedAt as string);
+    expect(dates).toEqual([...dates].sort().reverse());
+    expect(dates[0]).toBe("2026-02-27T10:00:00Z");
   });
 
   it("memory_sessions filters by project", async () => {
@@ -127,7 +130,7 @@ describe("MCP response bounds", () => {
 
     const res = await call("memory_recall", { query: "anything" });
     const total = (res.body.content as Array<{ text: string }>)
-      .map((c) => c.text.length)
+      .map((c) => Buffer.byteLength(c.text, "utf8"))
       .reduce((a, b) => a + b, 0);
 
     expect(total).toBeLessThanOrEqual(2000);
@@ -135,6 +138,29 @@ describe("MCP response bounds", () => {
       .map((c) => c.text)
       .join("");
     expect(joined).toContain("truncated");
+  });
+
+  // The ceiling is named in bytes. Measuring String.length instead would
+  // let multibyte content through at roughly three times the limit.
+  it("counts multibyte text in bytes, not UTF-16 units", async () => {
+    process.env["AGENTMEMORY_MCP_MAX_RESPONSE_BYTES"] = "2000";
+    sdk.overrides.set("mem::search", async () => ({
+      format: "full",
+      results: Array.from({ length: 200 }, (_, i) => ({
+        // 3 bytes per character in UTF-8.
+        observation: { id: `obs_${i}`, narrative: "\u4e2d".repeat(500) },
+      })),
+    }));
+
+    const res = await call("memory_recall", { query: "anything" });
+    const parts = res.body.content as Array<{ text: string }>;
+    const bytes = parts
+      .map((c) => Buffer.byteLength(c.text, "utf8"))
+      .reduce((a, b) => a + b, 0);
+
+    expect(bytes).toBeLessThanOrEqual(2000);
+    // And the cut must not leave a broken code point behind.
+    expect(parts.map((c) => c.text).join("")).not.toContain("\uFFFD");
   });
 
   it("bounds an unknown tool name echoed back in the error", async () => {

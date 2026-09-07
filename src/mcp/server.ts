@@ -55,6 +55,25 @@ function mcpMaxResponseBytes(): number {
     : MCP_MAX_RESPONSE_BYTES_DEFAULT;
 }
 
+function utf8Bytes(text: string): number {
+  return Buffer.byteLength(text, "utf8");
+}
+
+/**
+ * Cut a string to a UTF-8 byte budget without splitting a code point.
+ * String.slice counts UTF-16 units, so it neither measures the budget the
+ * env var names nor guarantees a valid tail.
+ */
+function sliceToUtf8Bytes(text: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  if (utf8Bytes(text) <= maxBytes) return text;
+  const cut = Buffer.from(text, "utf8").subarray(0, maxBytes);
+  const decoded = new TextDecoder("utf-8", { fatal: false }).decode(cut);
+  // A trailing partial sequence decodes to U+FFFD; drop it rather than
+  // emit a character the caller never sent.
+  return decoded.endsWith("\uFFFD") ? decoded.slice(0, -1) : decoded;
+}
+
 function truncationNotice(label: string, max: number): string {
   return (
     `\n\n[agentmemory] ${label} produced more than ${max} bytes and was ` +
@@ -74,8 +93,11 @@ function capMcpResponse(res: McpResponse, label: string): McpResponse {
 
   // Error bodies are not content arrays, and some of them echo a
   // caller-supplied name, so they need the ceiling too.
-  if (typeof body.error === "string" && body.error.length > max) {
-    return { ...res, body: { ...body, error: body.error.slice(0, max) } };
+  if (typeof body.error === "string" && utf8Bytes(body.error) > max) {
+    return {
+      ...res,
+      body: { ...body, error: sliceToUtf8Bytes(body.error, max) },
+    };
   }
 
   const content = body.content;
@@ -84,7 +106,7 @@ function capMcpResponse(res: McpResponse, label: string): McpResponse {
   // Reserve the notice up front, so a response that overshoots by one
   // character does not come back larger than the advertised ceiling.
   const notice = truncationNotice(label, max);
-  const budget = Math.max(0, max - notice.length);
+  const budget = Math.max(0, max - utf8Bytes(notice));
 
   let used = 0;
   let truncated = false;
@@ -96,13 +118,14 @@ function capMcpResponse(res: McpResponse, label: string): McpResponse {
       truncated = true;
       return { ...c, text: "" };
     }
-    if (c.text.length <= room) {
-      used += c.text.length;
+    const size = utf8Bytes(c.text);
+    if (size <= room) {
+      used += size;
       return part;
     }
     truncated = true;
     used = budget;
-    return { ...c, text: c.text.slice(0, room) };
+    return { ...c, text: sliceToUtf8Bytes(c.text, room) };
   });
   if (!truncated) return res;
   next.push({ type: "text", text: notice });
