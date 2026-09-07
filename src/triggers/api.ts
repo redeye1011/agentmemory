@@ -1585,7 +1585,6 @@ export function registerApiTriggers(
       req: ApiRequest<{
         dryRun?: boolean;
         supersededOlderThanDays?: number;
-        mergeDuplicateNames?: boolean;
         compactSourceIds?: boolean;
       }>,
     ): Promise<Response> => {
