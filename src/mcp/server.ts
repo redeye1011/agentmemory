@@ -55,16 +55,43 @@ function mcpMaxResponseBytes(): number {
     : MCP_MAX_RESPONSE_BYTES_DEFAULT;
 }
 
-function capMcpResponse(res: McpResponse, toolName: string): McpResponse {
-  const content = (res?.body as { content?: unknown })?.content;
-  if (!Array.isArray(content)) return res;
+function truncationNotice(label: string, max: number): string {
+  return (
+    `\n\n[agentmemory] ${label} produced more than ${max} bytes and was ` +
+    `truncated, so the payload above is cut mid-value and will not parse ` +
+    `as JSON. Re-run with a narrower request (lower limit, add a filter, ` +
+    `or ask for fewer fields), or raise ` +
+    `AGENTMEMORY_MCP_MAX_RESPONSE_BYTES.`
+  );
+}
+
+function capMcpResponse(res: McpResponse, label: string): McpResponse {
+  const body = res?.body as
+    | { content?: unknown; messages?: unknown; error?: unknown }
+    | undefined;
+  if (!body) return res;
   const max = mcpMaxResponseBytes();
+
+  // Error bodies are not content arrays, and some of them echo a
+  // caller-supplied name, so they need the ceiling too.
+  if (typeof body.error === "string" && body.error.length > max) {
+    return { ...res, body: { ...body, error: body.error.slice(0, max) } };
+  }
+
+  const content = body.content;
+  if (!Array.isArray(content)) return res;
+
+  // Reserve the notice up front, so a response that overshoots by one
+  // character does not come back larger than the advertised ceiling.
+  const notice = truncationNotice(label, max);
+  const budget = Math.max(0, max - notice.length);
+
   let used = 0;
   let truncated = false;
   const next = content.map((part) => {
     const c = part as { type?: string; text?: string };
     if (c?.type !== "text" || typeof c.text !== "string") return part;
-    const room = max - used;
+    const room = budget - used;
     if (room <= 0) {
       truncated = true;
       return { ...c, text: "" };
@@ -74,20 +101,12 @@ function capMcpResponse(res: McpResponse, toolName: string): McpResponse {
       return part;
     }
     truncated = true;
-    used = max;
+    used = budget;
     return { ...c, text: c.text.slice(0, room) };
   });
   if (!truncated) return res;
-  next.push({
-    type: "text",
-    text:
-      `\n\n[agentmemory] ${toolName} produced more than ${max} bytes and was ` +
-      `truncated, so the payload above is cut mid-value and will not parse ` +
-      `as JSON. Re-run with a narrower request (lower limit, add a filter, ` +
-      `or ask for fewer fields), or raise ` +
-      `AGENTMEMORY_MCP_MAX_RESPONSE_BYTES.`,
-  });
-  return { ...res, body: { ...(res.body as object), content: next } };
+  next.push({ type: "text", text: notice });
+  return { ...res, body: { ...body, content: next } };
 }
 
 export function registerMcpEndpoints(
@@ -313,6 +332,25 @@ export function registerMcpEndpoints(
             // at all despite promising "recent" sessions. `summary` alone
             // was 76% of those bytes. Return a bounded, projected list;
             // the full row is one memory_recall away.
+            if (
+              args.limit !== undefined &&
+              (typeof args.limit !== "number" ||
+                !Number.isInteger(args.limit) ||
+                args.limit < 1)
+            ) {
+              return {
+                status_code: 400,
+                body: { error: "limit must be a positive integer" },
+              };
+            }
+            for (const key of ["project", "status"] as const) {
+              if (args[key] !== undefined && !asNonEmptyString(args[key])) {
+                return {
+                  status_code: 400,
+                  body: { error: `${key} must be a non-empty string` },
+                };
+              }
+            }
             const limit = Math.max(1, Math.min(200, asNumber(args.limit, 20) ?? 20));
             const project = asNonEmptyString(args.project);
             const status = asNonEmptyString(args.status);
@@ -546,6 +584,26 @@ export function registerMcpEndpoints(
               // The REST default of 500 nodes is fine for the viewer and
               // far too large for an agent; 25 is a readable page. The
               // provenance array stays projected out unless asked for.
+              if (
+                args.limit !== undefined &&
+                (typeof args.limit !== "number" ||
+                  !Number.isInteger(args.limit) ||
+                  args.limit < 1)
+              ) {
+                return {
+                  status_code: 400,
+                  body: { error: "limit must be a positive integer" },
+                };
+              }
+              if (
+                args.includeSources !== undefined &&
+                typeof args.includeSources !== "boolean"
+              ) {
+                return {
+                  status_code: 400,
+                  body: { error: "includeSources must be a boolean" },
+                };
+              }
               payload.limit = Math.max(1, Math.min(200, asNumber(args.limit, 25) ?? 25));
               payload.includeSources = args.includeSources === true;
               const result = await sdk.trigger({
@@ -1369,7 +1427,7 @@ export function registerMcpEndpoints(
           default:
             return {
               status_code: 400,
-              body: { error: `Unknown tool: ${name}` },
+              body: { error: `Unknown tool: ${String(name).slice(0, 100)}` },
             };
         }
       };
@@ -1743,9 +1801,12 @@ export function registerMcpEndpoints(
         return { status_code: 400, body: { error: "name is required" } };
       }
 
+      const capped = (res: McpResponse): McpResponse =>
+        capMcpResponse(res, `prompt ${promptName.slice(0, 100)}`);
+
       const promptArgs = req.body?.arguments || {};
 
-      try {
+      const build = async (): Promise<McpResponse> => {
         switch (promptName) {
           case "recall_context": {
             const taskDesc = promptArgs.task_description;
@@ -1870,9 +1931,13 @@ export function registerMcpEndpoints(
           default:
             return {
               status_code: 400,
-              body: { error: `Unknown prompt: ${promptName}` },
+              body: { error: `Unknown prompt: ${promptName.slice(0, 100)}` },
             };
         }
+      };
+
+      try {
+        return capped(await build());
       } catch {
         return { status_code: 500, body: { error: "Internal error" } };
       }
