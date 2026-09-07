@@ -132,6 +132,27 @@ describe("CircuitBreaker", () => {
     expect(cb.isAllowed).toBe(true);
   });
 
+  // An in-flight request can succeed after a different request has already
+  // opened the breaker. That success must not strip the recovery deadline.
+  it("keeps openedAt when a success arrives while open", () => {
+    const cb = new CircuitBreaker();
+    cb.recordFailure();
+    cb.recordFailure();
+    cb.recordFailure();
+    expect(cb.getState().state).toBe("open");
+    const openedAt = cb.getState().openedAt;
+
+    cb.recordSuccess();
+
+    expect(cb.getState().state).toBe("open");
+    expect(cb.getState().openedAt).toBe(openedAt);
+    expect(cb.isAllowed).toBe(false);
+
+    vi.advanceTimersByTime(30_000);
+    expect(cb.isAllowed).toBe(true);
+    expect(cb.getState().state).toBe("half-open");
+  });
+
   it("still opens on a genuinely failing provider", () => {
     const cb = new CircuitBreaker({ failureThreshold: 10 });
     for (let i = 0; i < 10; i++) {

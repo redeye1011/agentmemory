@@ -45,6 +45,10 @@ export class CircuitBreaker {
   }
 
   recordSuccess(): void {
+    // A request already in flight when another request opened the breaker
+    // still lands here. Clearing openedAt in that state would strip the
+    // recovery deadline and leave the breaker open permanently.
+    if (this.state === "open") return;
     if (this.state === "half-open") {
       this.state = "closed";
     }

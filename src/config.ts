@@ -395,6 +395,14 @@ const CIRCUIT_BREAKER_FAILURE_THRESHOLD = 10;
 const CIRCUIT_BREAKER_FAILURE_WINDOW_MS = 60_000;
 const CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS = 15_000;
 
+function positiveEnvInt(value: string | undefined, fallback: number): number {
+  const parsed = safeParseInt(value, fallback);
+  // safeParseInt returns 0 or a negative number verbatim; CircuitBreaker
+  // rejects those and substitutes its own legacy fallbacks, so an override of
+  // "0" would silently select 3 / 60s / 30s rather than the values below.
+  return parsed > 0 ? parsed : fallback;
+}
+
 export function getCircuitBreakerOptions(): {
   failureThreshold: number;
   failureWindowMs: number;
@@ -402,15 +410,15 @@ export function getCircuitBreakerOptions(): {
 } {
   const env = getMergedEnv();
   return {
-    failureThreshold: safeParseInt(
+    failureThreshold: positiveEnvInt(
       env["AGENTMEMORY_CIRCUIT_FAILURE_THRESHOLD"],
       CIRCUIT_BREAKER_FAILURE_THRESHOLD,
     ),
-    failureWindowMs: safeParseInt(
+    failureWindowMs: positiveEnvInt(
       env["AGENTMEMORY_CIRCUIT_FAILURE_WINDOW_MS"],
       CIRCUIT_BREAKER_FAILURE_WINDOW_MS,
     ),
-    recoveryTimeoutMs: safeParseInt(
+    recoveryTimeoutMs: positiveEnvInt(
       env["AGENTMEMORY_CIRCUIT_RECOVERY_TIMEOUT_MS"],
       CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS,
     ),
