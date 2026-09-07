@@ -66,7 +66,7 @@ const MAX_GRAPH_QUERY_LIMIT = 5000;
 // enumeration. Aggregate stats (nodesByType / edgesByType) are computed
 // fresh during rebuild and stored alongside.
 const SNAPSHOT_TOP_NODES = DEFAULT_GRAPH_QUERY_LIMIT;
-const SNAPSHOT_KEY = "current";
+export const SNAPSHOT_KEY = "current";
 
 // `state::list` over a 75K-node scope can exceed the iii invocation
 // timeout. The query handler races the enumeration against this budget
@@ -217,11 +217,11 @@ function paginateFromSnapshot(
 // future extracts rebuild incrementally.
 const REBUILD_SAFE_NODE_CEILING = 25000;
 
-function nameIndexKey(type: string, name: string): string {
+export function nameIndexKey(type: string, name: string): string {
   return `${type}|${name}`;
 }
 
-function edgeIndexKey(
+export function edgeIndexKey(
   sourceNodeId: string,
   targetNodeId: string,
   type: string,
